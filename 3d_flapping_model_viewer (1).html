@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Flapping Image Model</title>
+    <!-- Load Three.js and OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: transparent !important;
+            background-color: transparent !important;
+            user-select: none;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            touch-action: none;
+            background: transparent !important;
+        }
+        canvas {
+            background: transparent !important;
+        }
+
+        /* Pure CSS 3D Fallback Container (Never blocked by CORS) */
+        #css3d-fallback {
+            display: none;
+            width: 100vw;
+            height: 100vh;
+            align-items: center;
+            justify-content: center;
+            perspective: 1100px;
+            background: transparent !important;
+        }
+        #css3d-stage {
+            position: relative;
+            width: min(72vw, 440px);
+            height: min(72vh, 440px);
+            transform-style: preserve-3d;
+            will-change: transform;
+        }
+        .css-wing-half {
+            position: absolute;
+            top: 0;
+            width: 50%;
+            height: 100%;
+            overflow: hidden;
+            transform-style: preserve-3d;
+            will-change: transform;
+        }
+        .css-wing-left {
+            left: 0;
+            transform-origin: right center;
+        }
+        .css-wing-right {
+            right: 0;
+            transform-origin: left center;
+        }
+        .css-wing-half img {
+            position: absolute;
+            top: 0;
+            width: 200%;
+            height: 100%;
+            max-width: none;
+            object-fit: contain;
+            pointer-events: none;
+        }
+        .css-wing-left img {
+            left: 0;
+        }
+        .css-wing-right img {
+            left: -100%;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Full-Screen WebGL Canvas Container (No Buttons, No UI Overlays) -->
+    <div id="canvas-container"></div>
+
+    <!-- Guaranteed Fallback Container if WebGL/CORS proxies fail -->
+    <div id="css3d-fallback">
+        <div id="css3d-stage">
+            <div class="css-wing-half css-wing-left" id="css-left-wing">
+                <img id="css-img-left" alt="" />
+            </div>
+            <div class="css-wing-half css-wing-right" id="css-right-wing">
+                <img id="css-img-right" alt="" />
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Target Image URL provided by user
+        const TARGET_IMAGE_URL = "https://i.postimg.cc/QxX8c3RV/Videoframe-20261114-213613-com-huawei-himovie-overseas-removebg-preview.png";
+
+        // Multi-step URLs to bypass CORS restrictions for WebGL texture binding
+        const IMAGE_CANDIDATES = [
+            TARGET_IMAGE_URL,
+            "https://api.allorigins.win/raw?url=" + encodeURIComponent(TARGET_IMAGE_URL),
+            "https://corsproxy.io/?" + encodeURIComponent(TARGET_IMAGE_URL),
+            "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(TARGET_IMAGE_URL)
+        ];
+
+        // Global Scene Variables
+        let scene, camera, renderer, controls;
+        let modelGroup;
+        let frontMesh, backMesh;
+        let frontGeom, backGeom;
+        let frontBasePositions, backBasePositions;
+        let clock = new THREE.Clock();
+
+        // Animation & Camera State
+        let userInteracting = false;
+        let lastInteractionTime = 0;
+        let sequenceStartTime = 0;
+        let currentRotationY = 0;
+        let currentFlapStrength = 1.0;
+        const flapSpeed = 6.5;
+        const flapAmplitude = 0.78;
+        let webglReady = false;
+        let usingCssFallback = false;
+
+        /**
+         * Initializes the Three.js scene, lighting, camera, controls, and loads texture
+         */
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            // 1. Transparent Scene Setup for Prism Live Overlay
+            scene = new THREE.Scene();
+            scene.background = null;
+
+            // 2. Camera Setup
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 0.1, 5.4);
+
+            // 3. Renderer Setup with Alpha Transparency Enabled
+            renderer = new THREE.WebGLRenderer({
+                antialias: true,
+                alpha: true,
+                premultipliedAlpha: false,
+                powerPreference: "high-performance"
+            });
+            renderer.setClearColor(0x000000, 0);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            container.appendChild(renderer.domElement);
+
+            // 4. Bright 360-Degree Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 1.35);
+            scene.add(ambientLight);
+
+            const frontLight = new THREE.DirectionalLight(0xffffff, 0.45);
+            frontLight.position.set(0, 2, 8);
+            scene.add(frontLight);
+
+            const backLight = new THREE.DirectionalLight(0xffffff, 0.45);
+            backLight.position.set(0, 2, -8);
+            scene.add(backLight);
+
+            // 5. OrbitControls for touch/mouse dragging
+            if (typeof THREE.OrbitControls !== 'undefined') {
+                controls = new THREE.OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.06;
+                controls.enablePan = false;
+                controls.minDistance = 2.0;
+                controls.maxDistance = 12.0;
+
+                controls.addEventListener('start', () => {
+                    userInteracting = true;
+                });
+                controls.addEventListener('end', () => {
+                    userInteracting = false;
+                    lastInteractionTime = clock.getElapsedTime();
+                });
+            }
+
+            // 6. Create Root Model Group
+            modelGroup = new THREE.Group();
+            scene.add(modelGroup);
+
+            // 7. Load image with CORS fallback chain
+            loadImageWithFallbacks(0);
+
+            // 8. Resize listener and start loop
+            window.addEventListener('resize', onWindowResize);
+            sequenceStartTime = clock.getElapsedTime();
+            animate();
+        }
+
+        /**
+         * Attempts to load image cleanly for WebGL; falls back to proxies, then pure CSS 3D
+         */
+        function loadImageWithFallbacks(index) {
+            if (index >= IMAGE_CANDIDATES.length) {
+                activateCss3dFallback();
+                return;
+            }
+
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+
+            img.onload = function () {
+                try {
+                    // Verify canvas readback works (ensures WebGL will not throw SecurityError)
+                    const testCanvas = document.createElement('canvas');
+                    testCanvas.width = 2;
+                    testCanvas.height = 2;
+                    const ctx = testCanvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, 2, 2);
+                    ctx.getImageData(0, 0, 1, 1);
+
+                    // Safe for WebGL Texture!
+                    const texture = new THREE.Texture(img);
+                    texture.encoding = THREE.sRGBEncoding;
+                    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+                    texture.needsUpdate = true;
+
+                    build3DFlappingMesh(texture, img.naturalWidth || 512, img.naturalHeight || 512);
+                    webglReady = true;
+                    sequenceStartTime = clock.getElapsedTime();
+                } catch (err) {
+                    // Tainted canvas, try next proxy
+                    loadImageWithFallbacks(index + 1);
+                }
+            };
+
+            img.onerror = function () {
+                loadImageWithFallbacks(index + 1);
+            };
+
+            img.src = IMAGE_CANDIDATES[index];
+        }
+
+        /**
+         * Builds the high-resolution double-sided 3D flapping mesh in Three.js
+         */
+        function build3DFlappingMesh(texture, imgWidth, imgHeight) {
+            const aspect = imgWidth / imgHeight;
+            const maxDim = 3.5;
+            const width = aspect >= 1 ? maxDim : maxDim * aspect;
+            const height = aspect >= 1 ? maxDim / aspect : maxDim;
+
+            const segX = 72;
+            const segY = 56;
+            const thickness = 0.025;
+
+            // Front Surface
+            frontGeom = new THREE.PlaneGeometry(width, height, segX, segY);
+            frontBasePositions = new Float32Array(frontGeom.attributes.position.array);
+
+            const frontMat = new THREE.MeshBasicMaterial({
+                map: texture,
+                transparent: true,
+                alphaTest: 0.05,
+                side: THREE.FrontSide
+            });
+
+            frontMesh = new THREE.Mesh(frontGeom, frontMat);
+            frontMesh.position.z = thickness * 0.5;
+            modelGroup.add(frontMesh);
+
+            // Back Surface (Mirrored UV so back view aligns cleanly with front silhouette)
+            backGeom = new THREE.PlaneGeometry(width, height, segX, segY);
+            backBasePositions = new Float32Array(backGeom.attributes.position.array);
+
+            const backUV = backGeom.attributes.uv;
+            for (let i = 0; i < backUV.count; i++) {
+                backUV.setX(i, 1.0 - backUV.getX(i));
+            }
+            backUV.needsUpdate = true;
+
+            const backMat = new THREE.MeshBasicMaterial({
+                map: texture,
+                transparent: true,
+                alphaTest: 0.05,
+                side: THREE.FrontSide
+            });
+
+            backMesh = new THREE.Mesh(backGeom, backMat);
+            backMesh.rotation.y = Math.PI;
+            backMesh.position.z = -thickness * 0.5;
+            modelGroup.add(backMesh);
+        }
+
+        /**
+         * Activates pure HTML/CSS 3D flapping fallback if all CORS proxies are unreachable
+         */
+        function activateCss3dFallback() {
+            usingCssFallback = true;
+            document.getElementById('canvas-container').style.display = 'none';
+            const fallbackDiv = document.getElementById('css3d-fallback');
+            fallbackDiv.style.display = 'flex';
+
+            document.getElementById('css-img-left').src = TARGET_IMAGE_URL;
+            document.getElementById('css-img-right').src = TARGET_IMAGE_URL;
+            sequenceStartTime = clock.getElapsedTime();
+        }
+
+        /**
+         * Updates wing flapping vertex deformation
+         */
+        function updateWingFlapping(time, strength) {
+            if (!webglReady || !frontGeom || !backGeom) return;
+
+            const fPos = frontGeom.attributes.position;
+            const bPos = backGeom.attributes.position;
+            const count = fPos.count;
+
+            const halfWidth = 1.75;
+            const primaryWave = Math.sin(time * flapSpeed);
+            const secondaryWave = Math.sin(time * flapSpeed * 2.0 - 0.75) * 0.18;
+
+            for (let i = 0; i < count; i++) {
+                const idx = i * 3;
+                const bx = frontBasePositions[idx];
+                const by = frontBasePositions[idx + 1];
+
+                const distFromCenter = Math.abs(bx);
+                const normSpan = Math.min(distFromCenter / halfWidth, 1.0);
+                const hingeWeight = Math.max(0, (normSpan - 0.06) / 0.94);
+                const bendFactor = Math.pow(hingeWeight, 1.65);
+
+                const phaseLag = normSpan * 1.15 - (by * 0.15);
+                const localWave = Math.sin(time * flapSpeed - phaseLag) + secondaryWave * hingeWeight;
+
+                const zOffset = localWave * flapAmplitude * bendFactor * strength;
+                const xPull = -Math.sign(bx) * Math.abs(zOffset) * 0.16 * hingeWeight;
+                const yLift = Math.abs(localWave) * 0.08 * bendFactor * strength;
+
+                fPos.array[idx] = bx + xPull;
+                fPos.array[idx + 1] = by + yLift;
+                fPos.array[idx + 2] = zOffset;
+
+                const backBx = backBasePositions[idx];
+                bPos.array[idx] = backBx - xPull;
+                bPos.array[idx + 1] = by + yLift;
+                bPos.array[idx + 2] = -zOffset;
+            }
+
+            fPos.needsUpdate = true;
+            bPos.needsUpdate = true;
+
+            // Subtle natural hover motion during flapping
+            modelGroup.position.y = (-primaryWave * 0.08) * strength;
+            modelGroup.rotation.x = 0.08 * strength;
+        }
+
+        /**
+         * Computes animation phase:
+         * 1) Flap + Rotate Front -> Right -> Back -> Front (16 seconds)
+         * 2) Stay calm at Front view for 40 seconds
+         */
+        function getSequenceTargets(elapsed) {
+            const flapCycleDuration = 16.0;
+            const stayFrontDuration = 40.0;
+            const totalCycle = flapCycleDuration + stayFrontDuration;
+
+            const seqTime = (elapsed - sequenceStartTime) % totalCycle;
+
+            let targetRotY = 0;
+            let targetFlap = 1.0;
+
+            if (seqTime < flapCycleDuration) {
+                targetFlap = 1.0;
+                if (seqTime < 3.5) {
+                    // Front flapping
+                    targetRotY = 0;
+                } else if (seqTime < 6.0) {
+                    // Smooth turn to Right side
+                    const p = smoothstep((seqTime - 3.5) / 2.5);
+                    targetRotY = p * (Math.PI * 0.5);
+                } else if (seqTime < 8.5) {
+                    // Hold Right side flapping
+                    targetRotY = Math.PI * 0.5;
+                } else if (seqTime < 11.0) {
+                    // Smooth turn to Back view
+                    const p = smoothstep((seqTime - 8.5) / 2.5);
+                    targetRotY = (Math.PI * 0.5) + p * (Math.PI * 0.5);
+                } else if (seqTime < 13.5) {
+                    // Hold Back view flapping
+                    targetRotY = Math.PI;
+                } else {
+                    // Smooth turn back to Front
+                    const p = smoothstep((seqTime - 13.5) / 2.5);
+                    targetRotY = Math.PI + p * Math.PI;
+                }
+            } else {
+                // Stay at Front for 40 seconds
+                targetRotY = Math.PI * 2;
+                targetFlap = 0.0;
+            }
+
+            return { targetRotY, targetFlap };
+        }
+
+        function smoothstep(t) {
+            const x = Math.max(0, Math.min(1, t));
+            return x * x * (3 - 2 * x);
+        }
+
+        /**
+         * Main animation loop
+         */
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const elapsed = clock.getElapsedTime();
+            const { targetRotY, targetFlap } = getSequenceTargets(elapsed);
+
+            currentFlapStrength += (targetFlap - currentFlapStrength) * 0.06;
+
+            if (!userInteracting) {
+                if (currentRotationY > Math.PI * 1.98 && targetRotY === 0) {
+                    currentRotationY = 0;
+                }
+                currentRotationY += (targetRotY - currentRotationY) * 0.07;
+            }
+
+            if (usingCssFallback) {
+                // Animate CSS 3D fallback
+                const stage = document.getElementById('css3d-stage');
+                const leftWing = document.getElementById('css-left-wing');
+                const rightWing = document.getElementById('css-right-wing');
+
+                const degY = (currentRotationY * 180) / Math.PI;
+                const flapDeg = Math.sin(elapsed * flapSpeed) * 38 * currentFlapStrength;
+                const bobY = -Math.sin(elapsed * flapSpeed) * 14 * currentFlapStrength;
+
+                stage.style.transform = `translateY(${bobY}px) rotateY(${degY}deg)`;
+                leftWing.style.transform = `rotateY(${flapDeg}deg)`;
+                rightWing.style.transform = `rotateY(${-flapDeg}deg)`;
+                return;
+            }
+
+            if (webglReady) {
+                updateWingFlapping(elapsed, currentFlapStrength);
+
+                if (!userInteracting && (elapsed - lastInteractionTime > 1.2)) {
+                    modelGroup.rotation.y = currentRotationY;
+                }
+            }
+
+            if (controls) controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        window.onload = function () {
+            init();
+        };
+    </script>
+</body>
+</html>
